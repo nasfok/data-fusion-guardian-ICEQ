@@ -1,14 +1,15 @@
-"""CoLES: Contrastive Learning for Event Sequences.
+"""CoLES (Contrastive Learning for Event Sequences).
 
-Самообучение на 91M+86M транзакциях → клиентские эмбеддинги.
-Использует pytorch-lifestream (Sber AI Lab, 2-е место Data Fusion 2024).
+Обучение на 91M+86M транзакциях -> эмбеддинги клиентов.
+Использует pytorch-lifestream.
 
 Пайплайн:
 1. Подготовка последовательностей транзакций по клиентам (pretrain+train)
 2. Обучение CoLES энкодера (GRU) контрастивным лоссом
-3. Извлечение клиентских эмбеддингов (256-dim)
-4. Добавление к фичам CatBoost → переобучение → сабмит
+3. Извлечение эмбеддингов клиентов (256-мерные)
+4. Добавление к фичам CatBoost -> refit -> submission
 """
+
 import gc, sys, time, warnings, functools
 print = functools.partial(print, flush=True)
 import numpy as np
