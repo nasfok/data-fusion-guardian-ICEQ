@@ -89,35 +89,35 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 
 `customer_id`, `event_type_nm`, `event_desc`, `channel_indicator_type`, `channel_indicator_sub_type`, `currency_iso_cd`, `mcc_code_i`, `pos_cd`, `timezone`, `operating_system_type`, `phone_voip_call_state`, `web_rdp_connection`, `developer_tools_i`, `compromised_i`, `prev_mcc_code_i`
 
-### 2. Суммовые (8)
+### 2. Sums (8)
 
 `amt`, `amt_log_abs`, `amt_abs`, `amt_is_negative`, `amt_delta_prev`, `amt_to_prev_mean`, `amt_zscore`, `amt_profile_zscore`
 
-### 3. Временные (11)
+### 3. Time-aware (11)
 
 `hour`, `weekday`, `day`, `month`, `is_weekend`, `is_night`, `is_night_early`, `hour_sin`, `hour_cos`, `event_day_number`, `day_of_year`
 
-### 4. Устройство (10)
+### 4. Device-aware (10)
 
 `battery_pct`, `os_ver_major`, `screen_w`, `screen_h`, `screen_pixels`, `screen_ratio`, `voip_rdp_combo`, `any_risk_flag`, `compromised_devtools`, `lang_mismatch`
 
-### 5. Последовательные / Клиентские (20+)
+### 5. Последовательные / customer-based (20+)
 
 `cust_prev_events`, `cust_prev_amt_mean`, `cust_prev_amt_std`, `sec_since_prev_event`, `cnt_prev_same_type/desc/mcc/subtype/session`, `sec_since_prev_same_type/desc/mcc`, `events_before_today`, `mcc_changed`, `session_changed`, `cust_events_per_day`
 
-### 6. Скользящая скорость (12)
+### 6. Rolling speed-based (12)
 
 `cnt_15min`, `cnt_1h`, `cnt_6h`, `cnt_24h`, `cnt_7d`, `amt_sum_15min`, `amt_sum_1h`, `amt_sum_24h`, `amt_ratio_24h`, `burst_ratio_1h_24h`, `spend_concentration_1h`, `burst_ratio_15m_1h`
 
-### 7. Внутридневные (3)
+### 7. Current (transaction-day features) (3)
 
 `today_total_amount`, `today_max_amount`, `today_amt_vs_daily_norm`
 
-### 8. Скользящие средние по кол-ву транзакций (5)
+### 8. Rolling mean (скользящие средние) по кол-ву транзакций (5)
 
 `amt_avg_5`, `amt_avg_10`, `amt_avg_50`, `amt_avg_100`, `amt_momentum` (= avg_5 − avg_50)
 
-### 9. Марковская модель MCC (2)
+### 9. Markov MCC (2)
 
 `markov_mcc_prob`, `markov_mcc_surprise` - аномалия перехода между категориями MCC
 
@@ -129,7 +129,7 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 
 `os_changed`, `screen_changed`, `tz_changed`
 
-### 12. Паттерны пропусков (11)
+### 12. Паттерны пропусков (null values) (11)
 
 `null_{col}` для 10 устройственных колонок + `null_device_count`
 
@@ -139,22 +139,22 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 
 + производные: `amt_over_profile_mean`, `amt_over_profile_p95`, `amt_profile_zscore`
 
-### 14. Априорные вероятности (22)
+### 14. Prior fraud ratios (22)
 
 `prior_{key}_cnt/red_rate/red_share` для 7 колонок + 4 интеракционные пары
 
-### 15. История обратной связи (14, только FB-модель)
+### 15. Фидбек-фичи (история пользователей - только для тех, у которых есть лейблы в трейне) (14, только FB-модель)
 
 `cust_prev_red/yellow_lbl_cnt`, `rates`, `flags`, `sec_since_prev_red/yellow_lbl`, `per-desc counts`
 
-### 16. Фичи детекции типов фрода (15) - **НОВЫЕ**
+### 16. Фичи детекции типов фрода (15)
 
 **Социальная инженерия**:
-- `voip_cnt_15min`, `had_voip_before_txn` - VoIP-активность за 15 минут до транзакции (разговаривал клиент с кем-то по телефону - риск мошенничества)
+- `voip_cnt_15min`, `had_voip_before_txn` - VoIP-активность за 15 минут до транзакции (клиент разговаривал с кем-то по телефону за 15 минут до транзакции / в момент транзакции - риск мошенничества)
 - `is_round_amount` - круглые суммы (кратные 500/1000)
 - `sec_since_session_start` - время от начала сессии
 
-**Поведенческий дрейф (friendly fraud)**:
+**Изменение поведения пользователя (friendly fraud)**:
 - `hour_mean_5`, `hour_drift` - среднее значение часа за 5 транзакций vs профильное
 - `amt_drift_5` - среднее за 5 транзакций vs историческое среднее
 - `mcc_diversity_ratio` - уникальные MCC за 24ч / профильное кол-во
