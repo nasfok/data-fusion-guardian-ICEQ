@@ -1,4 +1,6 @@
-"""CatBoost пайплайн для детекции фрода."""
+"""CatBoost пайплайн (только трейн, валидация и сохранение в кеш.
+Нужно рефитнуть на полных данных (и еще + CoLES эмбеддинги) в run_coles_refit.py"""
+
 import gc, os, sys, time, math, warnings, functools
 import numpy as np
 import pandas as pd
