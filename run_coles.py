@@ -32,8 +32,8 @@ _ch.setFormatter(_log_fmt)
 _logger.addHandler(_ch)
 log = _logger.info
 
-DATA_DIR = Path("f:/dev/data_fusion/data")
-CACHE_COLES = Path("f:/dev/data_fusion/cache_coles")
+DATA_DIR = Path("/kaggle/input/datasets/d1ffic00lt/data-fusion-2026-case-1")
+CACHE_COLES = Path("/kaggle/working/cache")
 CACHE_COLES.mkdir(parents=True, exist_ok=True)
 SEED = 42
 
