@@ -26,10 +26,11 @@ with open(CACHE_V5 / "v5_config.json") as f:
 BEST_CB_W = tuple(cfg["best_w"])
 BEST_ALPHA = cfg["best_alpha"]
 BI_MAIN = cfg["bi_main"]
+BI_REC = cfg["bi_rec"]
 BI_SUSP = cfg["bi_susp"]
 BI_RG = cfg["bi_rg"]
 BI_FB = cfg["bi_fb"]
-log(f"Config: CB_W={BEST_CB_W}, alpha={BEST_ALPHA}, BI_MAIN={BI_MAIN}, BI_SUSP={BI_SUSP}, BI_RG={BI_RG}, BI_FB={BI_FB}")
+log(f"Config: CB_W={BEST_CB_W}, alpha={BEST_ALPHA}, BI_MAIN={BI_MAIN}, BI_REC={BI_REC}, BI_SUSP={BI_SUSP}, BI_RG={BI_RG}, BI_FB={BI_FB}")
 
 CAT_COLS = ["customer_id","event_type_nm","event_desc","channel_indicator_type","channel_indicator_sub_type","currency_iso_cd","mcc_code_i","pos_cd","timezone","operating_system_type","phone_voip_call_state","web_rdp_connection","developer_tools_i","compromised_i","prev_mcc_code_i","accept_language_i","browser_language_i","device_fp_i"]
 FB_FEATURE_COLS = ["cust_prev_red_lbl_cnt","cust_prev_yellow_lbl_cnt","cust_prev_labeled_cnt","cust_prev_red_lbl_rate","cust_prev_yellow_lbl_rate","cust_prev_susp_lbl_rate","cust_prev_any_red_flag","cust_prev_any_yellow_flag","sec_since_prev_red_lbl","sec_since_prev_yellow_lbl","cnt_prev_labeled_same_desc","cnt_prev_red_same_desc_lbl","cnt_prev_yellow_same_desc_lbl","red_rate_prev_same_desc_lbl"]
@@ -193,6 +194,7 @@ y_susp = (raw != -1).astype(np.int8)
 w = make_weights(raw)
 w_susp = np.where(raw != -1, 6.0, 1.2).astype(np.float32)
 labeled_mask = raw != -1
+recent_mask = (train_df["event_ts"] >= pd.Timestamp("2025-02-01")) | (raw != -1)
 log(f"Трейн: {len(train_df):,}, Тест: {len(test_df):,}, Фичей: {len(feature_cols)}")
 
 # ── Рефит по всем сидам ──
@@ -202,6 +204,7 @@ log(f"Веса блендинга: MAIN={wm}, REC={wr}, PROD={wp}")
 for seed in [42, 123, 777]:
     log(f"\n=== СИД {seed} ===")
     log("MAIN..."); mf_main = refit(train_df[feature_cols], y, w, cat_cols, BI_MAIN, seed=seed); gc.collect()
+    log("REC..."); mf_rec = refit(train_df.loc[recent_mask, feature_cols], y[recent_mask], w[recent_mask], cat_cols, BI_REC, seed=seed); gc.collect()
     log("SUSP..."); mf_susp = refit(train_df[feature_cols], y_susp, w_susp, cat_cols, BI_SUSP, seed=seed); gc.collect()
     log("RG..."); mf_rg = refit(
         train_df.loc[labeled_mask, feature_cols], y[labeled_mask],
@@ -212,10 +215,11 @@ for seed in [42, 123, 777]:
 
     tpool = Pool(test_df[feature_cols], cat_features=cat_cols)
     t_main = mf_main.predict(tpool, prediction_type="RawFormulaVal")
+    t_rec = mf_rec.predict(tpool, prediction_type="RawFormulaVal")
     t_susp = mf_susp.predict(tpool, prediction_type="RawFormulaVal")
     t_rg = mf_rg.predict(tpool, prediction_type="RawFormulaVal")
     t_prod = _logit(_sigmoid(t_susp) * _sigmoid(t_rg))
-    t_cb = wm * t_main + wp * t_prod  # wr=0 обычно, RECENT пропущен
+    t_cb = wm * t_main + wr * t_rec + wp * t_prod
     fb_tpool = Pool(test_df[fb_feature_cols], cat_features=cat_cols)
     t_fb = mf_fb.predict(fb_tpool, prediction_type="RawFormulaVal")
 
@@ -223,7 +227,7 @@ for seed in [42, 123, 777]:
         all_cb = [t_cb]; all_fb = [t_fb]
     else:
         all_cb.append(t_cb); all_fb.append(t_fb)
-    del mf_main, mf_susp, mf_rg, mf_fb; gc.collect()
+    del mf_main, mf_rec, mf_susp, mf_rg, mf_fb; gc.collect()
 
 # ── Усреднение сидов + FB инъекция ──
 avg_cb = np.mean(all_cb, axis=0)
