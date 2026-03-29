@@ -13,7 +13,7 @@ from catboost import CatBoostClassifier, Pool
 warnings.filterwarnings("ignore")
 
 # ── Конфигурация ──
-DATA_DIR = Path("/kaggle/input/datasets/kagglercs/data-fusion-strazh")
+DATA_DIR = Path("/kaggle/input/datasets/d1ffic00lt/data-fusion-2026-case-1")
 CACHE_DIR = Path("/kaggle/working/cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SUBMISSIONS = Path("/kaggle/working/")
