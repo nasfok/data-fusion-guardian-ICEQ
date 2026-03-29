@@ -31,7 +31,7 @@ BI_RG = cfg["bi_rg"]
 BI_FB = cfg["bi_fb"]
 log(f"Config: CB_W={BEST_CB_W}, alpha={BEST_ALPHA}, BI_MAIN={BI_MAIN}, BI_SUSP={BI_SUSP}, BI_RG={BI_RG}, BI_FB={BI_FB}")
 
-CAT_COLS = ["customer_id","event_type_nm","event_desc","channel_indicator_type","channel_indicator_sub_type","currency_iso_cd","mcc_code_i","pos_cd","timezone","operating_system_type","phone_voip_call_state","web_rdp_connection","developer_tools_i","compromised_i","prev_mcc_code_i"]
+CAT_COLS = ["customer_id","event_type_nm","event_desc","channel_indicator_type","channel_indicator_sub_type","currency_iso_cd","mcc_code_i","pos_cd","timezone","operating_system_type","phone_voip_call_state","web_rdp_connection","developer_tools_i","compromised_i","prev_mcc_code_i","accept_language_i","browser_language_i","device_fp_i"]
 FB_FEATURE_COLS = ["cust_prev_red_lbl_cnt","cust_prev_yellow_lbl_cnt","cust_prev_labeled_cnt","cust_prev_red_lbl_rate","cust_prev_yellow_lbl_rate","cust_prev_susp_lbl_rate","cust_prev_any_red_flag","cust_prev_any_yellow_flag","sec_since_prev_red_lbl","sec_since_prev_yellow_lbl","cnt_prev_labeled_same_desc","cnt_prev_red_same_desc_lbl","cnt_prev_yellow_same_desc_lbl","red_rate_prev_same_desc_lbl"]
 META_COLS = ["event_id","period","event_ts","is_train_sample","is_test","train_target_raw","target_bin"]
 
@@ -70,6 +70,14 @@ PC = {
     "mcc_code_i": pl.col("mcc_code").cast(pl.Int32, strict=False).fill_null(-1).alias("mcc_code_i"),
     "event_type_nm": pl.col("event_type_nm").cast(pl.Int32, strict=False).fill_null(-1).alias("event_type_nm"),
     "pos_cd": pl.col("pos_cd").cast(pl.Int16, strict=False).fill_null(-1).alias("pos_cd"),
+    "timezone": pl.col("timezone").cast(pl.Int32, strict=False).fill_null(-1).alias("timezone"),
+    "accept_language_i": pl.col("accept_language").cast(pl.Int32, strict=False).fill_null(-1).alias("accept_language_i"),
+    "device_fp_i": (
+        pl.col("screen_size").str.extract(r"^(\d+)", 1).cast(pl.Int64, strict=False).fill_null(-1) * 100_000_000
+        + pl.col("screen_size").str.extract(r"x(\d+)$", 1).cast(pl.Int64, strict=False).fill_null(-1) * 100_000
+        + pl.col("operating_system_type").cast(pl.Int64, strict=False).fill_null(-1) * 1000
+        + (pl.col("accept_language").cast(pl.Int32, strict=False).fill_null(-1).cast(pl.Int64) % 1000)
+    ).alias("device_fp_i"),
 }
 pfc = []
 for k, e in PC.items():
@@ -92,6 +100,64 @@ for k, e in PC.items():
     log(f"  {k}: {pr.height} категорий")
 if pfc:
     features = features.with_columns([pl.col(c).fill_null(pl.col(c).mean()).alias(c) for c in pfc])
+
+# ── Risk interaction features ──
+_risk_exprs = []
+for _pc, _fc, _alias in [
+    ("prior_event_desc_red_rate",  "is_new_desc_for_customer",     "risk_new_desc_x_prior"),
+    ("prior_timezone_red_rate",    "is_new_timezone_for_customer", "risk_new_tz_x_prior"),
+    ("prior_mcc_code_i_red_rate",  "is_new_mcc_for_customer",      "risk_new_mcc_x_prior"),
+    ("prior_device_fp_i_red_rate", "is_new_device_for_customer",   "risk_new_device_x_prior"),
+]:
+    if _pc in features.columns and _fc in features.columns:
+        _risk_exprs.append(
+            (pl.col(_pc) * (1.0 + pl.col(_fc).cast(pl.Float32))).cast(pl.Float32).alias(_alias)
+        )
+if _risk_exprs:
+    features = features.with_columns(_risk_exprs)
+    log(f"  Added {len(_risk_exprs)} risk interaction features")
+
+# ── Интеракционные априоры ──
+log("Интеракционные априоры...")
+INTERACTIONS = [("mcc_code_i", "event_type_nm"), ("event_desc", "channel_indicator_sub_type"),
+                ("pos_cd", "event_type_nm"), ("mcc_code_i", "channel_indicator_sub_type")]
+ix_feat_cols = []
+for col_a, col_b in INTERACTIONS:
+    ix_name = f"{col_a}x{col_b}"
+    sel_a = PC.get(col_a, pl.col(col_a))
+    sel_b = PC.get(col_b, pl.col(col_b))
+    ix_lf = pl.concat([
+        pl.scan_parquet(DATA_DIR / f"train_part_{i}.parquet").select([pl.col("event_id"), sel_a, sel_b])
+        for i in [1, 2, 3]
+    ], how="vertical_relaxed")
+    ix_total = ix_lf.group_by([col_a, col_b]).len().rename({"len": "_cnt"})
+    ix_labeled = ix_lf.join(labels_lf, on="event_id", how="inner").group_by([col_a, col_b]).agg([
+        pl.len().alias("_lbl"), pl.sum("target").cast(pl.Float64).alias("_red")
+    ])
+    ix_prior = ix_total.join(ix_labeled, on=[col_a, col_b], how="left").with_columns([
+        pl.col("_lbl").fill_null(0.0), pl.col("_red").fill_null(0.0)
+    ]).with_columns([
+        ((pl.col("_red") + 1.0) / (pl.col("_cnt") + 200.0)).cast(pl.Float32).alias(f"prior_{ix_name}_red_rate"),
+        ((pl.col("_red") + 1.0) / (pl.col("_lbl") + 2.0)).cast(pl.Float32).alias(f"prior_{ix_name}_red_share"),
+    ]).select([col_a, col_b, f"prior_{ix_name}_red_rate", f"prior_{ix_name}_red_share"]).collect()
+    features = features.join(ix_prior, on=[col_a, col_b], how="left")
+    ix_feat_cols.extend([f"prior_{ix_name}_red_rate", f"prior_{ix_name}_red_share"])
+    log(f"  {ix_name}: {ix_prior.height} combos")
+if ix_feat_cols:
+    features = features.with_columns([pl.col(c).fill_null(pl.col(c).mean()).alias(c) for c in ix_feat_cols])
+
+# ── Фичи паттернов пропусков ──
+log("Фичи паттернов пропусков...")
+_null_device_cols = ["phone_voip_call_state", "web_rdp_connection", "timezone",
+                     "operating_system_type", "developer_tools_i", "compromised_i",
+                     "battery_pct", "os_ver_major", "screen_w", "screen_h"]
+_null_exprs = [(pl.col(c) == -1).cast(pl.Int8).alias(f"null_{c}") for c in _null_device_cols if c in features.columns]
+features = features.with_columns(_null_exprs)
+_null_cnt_cols = [f"null_{c}" for c in _null_device_cols if c in features.columns]
+features = features.with_columns(
+    sum(pl.col(c) for c in _null_cnt_cols).cast(pl.Int8).alias("null_device_count")
+)
+log(f"  Added {len(_null_exprs)+1} null features")
 
 # ── Конвертация в pandas ──
 log("Конвертация в pandas...")

@@ -1,6 +1,6 @@
 # Data Fusion 2026 "Страж" (Guardian): Fraud Detection Solution
 
-## Public LB: 0.1413 PR-AUC (solo) | 0.1498 (4-way blend)
+## Public LB: 0.1445 PR-AUC (solo)
 
 **Team:** Сергей + Кирилл
 **Approach:** CatBoost Ensemble + CoLES Self-Supervised Embeddings + Feedback Model Injection
@@ -480,7 +480,22 @@ DATA_DIR = Path("path/to/data")
 
 ---
 
-## 10. Ideas for Further Improvement
+## 10. v7 Update: 0.1414 -> 0.1445
+
+Six new feature groups added, bringing +0.003 LB:
+
+1. **Device Fingerprint system (20 features)** - synthetic device ID from screen+OS+language, cross-customer metrics (how many customers use this device?), customer-device history
+2. **"First time for customer" flags (6 features)** - is_new_device/desc/mcc/timezone/subtype/os
+3. **Risk interaction features (4)** - prior_rate x (1 + is_new_flag), amplifying risk for novel behavior
+4. **Extended amount context (8)** - amt_bucket, max/mean per desc & device, rolling ratios
+5. **Velocity per currency/channel/session (5)** - cross-category velocity features
+6. **Extended priors** - priors for accept_language and device_fp
+
+Total features: ~200+ (up from 118).
+
+---
+
+## 11. Ideas for Further Improvement
 
 ### High Priority (estimated +0.01-0.03)
 

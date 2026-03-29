@@ -10,7 +10,7 @@
 - **Метрика**: PR-AUC (`sklearn.metrics.average_precision_score`)
 - **Классы**: RED  (51K, фрод), YELLOW  (36K, подтверждённые подозрительные), GREEN  (остальное)
 - **Лидерборд**: Public = недели 1,3,5 (30%), Private = остальные 7 недель (70%)
-- **Лучший скор**: **0.1414 LB** (public)
+- **Лучший скор**: **0.1445 LB** (public)
 
 ![EDA Overview](images/eda_overview.png)
 
@@ -29,11 +29,11 @@ RAM: 64GB
 ## Структура нашего решения
 
 ```
-current_pipeline/
- run_catboost.py          # Основной CatBoost пайплайн (фичи + обучение + блендинг)
- run_coles.py             # Обучение CoLES -> извлечение юзер-эмбеддингов
- run_coles_refit.py       # Refit CatBoost (+ CoLES эмбеддинги) -> создание сабмита
- coles_seed_fb50.csv      # Лучший сабмит (0.1414)
+run_catboost.py          # Основной CatBoost пайплайн (фичи + обучение + блендинг)
+run_coles.py             # Обучение CoLES -> извлечение юзер-эмбеддингов
+run_coles_refit.py       # Refit CatBoost (+ CoLES эмбеддинги) -> создание сабмита
+submission.csv           # Лучший сабмит (0.1445)
+coles_model.pt           # Обученный CoLES энкодер (2.9 MB)
 ```
 
 ### Трехэтапный пайплайн
@@ -106,6 +106,37 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 ### 4. Device-aware (10)
 
 `battery_pct`, `os_ver_major`, `screen_w`, `screen_h`, `screen_pixels`, `screen_ratio`, `voip_rdp_combo`, `any_risk_flag`, `compromised_devtools`, `lang_mismatch`
+
+### 18. Device Fingerprint система (20)
+
+`device_fp_i` — синтетический ID устройства (`screen_w×1e8 + screen_h×1e5 + os_type×1e3 + accept_lang%1000`)
+
+Кросс-клиентские метрики (глобально отсортированные по времени):
+`device_prev_ops_log`, `device_prev_unique_customers_log`, `device_prev_unique_sessions_log`, `device_customer_diversity`, `device_prev_same_customer`, `device_prev_same_desc`, `device_prev_same_mcc`, `device_prev_same_timezone`, `device_prev_same_subtype`
+
+Клиент × устройство: `cust_prev_same_device`, `sec_since_prev_same_device`, `cust_prev_mean_amt_same_device`, `amt_vs_same_device_mean`
+
+Прочее: `accept_language_i`, `browser_language_i`, `accept_language_missing`
+
+### 19. «Впервые для клиента» флаги (6)
+
+`is_new_device_for_customer`, `is_new_desc_for_customer`, `is_new_mcc_for_customer`, `is_new_timezone_for_customer`, `is_new_subtype_for_customer`, `is_new_os_for_customer`
+
+### 20. Risk interaction features (4)
+
+`risk_new_desc_x_prior`, `risk_new_tz_x_prior`, `risk_new_mcc_x_prior`, `risk_new_device_x_prior` — усиление априорного риска при первом появлении категории у клиента (`prior_rate × (1 + is_new_flag)`)
+
+### 21. Расширенный amount-контекст (8)
+
+`amt_bucket`, `cust_prev_max_amt`, `amt_vs_prev_max`, `cust_prev_mean_amt_same_desc`, `amt_vs_same_desc_mean`, `max_amt_last_24h`, `amt_vs_1h_sum`, `amt_vs_24h_sum`
+
+### 22. Velocity по валюте / каналу / сессии (5)
+
+`cnt_prev_same_currency`, `sec_since_prev_same_currency`, `sec_since_prev_same_channel_type`, `session_amt_before`, `events_before_hour`
+
+### 23. Временные (2)
+
+`days_since_first_event`, расширенные приоры по `accept_language_i` и `device_fp_i`
 
 ### 5. Последовательные / customer-based (20+)
 
@@ -212,9 +243,13 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 | 9 | **Null-паттерны** | Определяют тип платформы |
 | 10 | **Марковская MCC-аномалия** | Удивление перехода между MCC |
 | 11 | **15-мин агрегаты** | Ловят card-testing атаки |
-| 12 | **Внутридневные фичи** | Другой угол vs скользящие окна |
+| 12 | **Transaction-day фичи** | Другой угол vs скользящие окна |
 | 13 | **Скользящие средние** (amt_avg_5/10/50/100) | Контекст последних транзакций |
 | 14 | **Фичи детекции типов фрода** (VoIP, MCC scatter, impossible travel) | 0.1384 -> 0.1414 |
+| 15 | **Device Fingerprint система** (`device_fp_i` + 20 кросс-клиентских фичей) | Основной драйвер буста |
+| 16 | **Флаги необычного поведения клиента** (6 × is_new_*) + **Risk interactions** (prior × novelty) | Усиление сигнала риска |
+| 17 | **Расширенный amount-фичи** (amt_bucket, max/mean по desc & device, rolling ratios) | Аномалии суммы vs исторический контекст |
+| 18 | **Language категории** (`accept_language_i`, `browser_language_i`) + расширенные приоры | Новые cat-features |
 
 ---
 
@@ -254,16 +289,16 @@ FB_inject = (1 - α) * rank(CB_blend) + α * rank(FB_model)
 ## Быстрый старт
 
 ### Вариант 1: Готовый сабмит (0 минут)
-Скачайте `coles_seed_fb50.csv` и загрузите на лидерборд → **0.1414 PR-AUC**
+Скачайте `submission.csv` и загрузите на лидерборд -> **0.1445 PR-AUC**
 
-### Вариант 2: С готовыми весами (~24 мин GPU)
+### Вариант 2: С готовыми весами (+-24 мин GPU)
 ```bash
 # Фичи уже в кэше, CoLES эмбеддинги готовы
 # Только refit CatBoost (3 seeds x 4 модели)
 python run_coles_refit.py
 ```
 
-### Вариант 3: Полный пайплайн (~60 мин)
+### Вариант 3: Полный пайплайн (+-60 мин)
 ```bash
 python run_catboost.py       # 40 мин - фичи + обучение
 python run_coles.py          # 11 мин - CoLES pre-training
@@ -273,7 +308,7 @@ python run_coles_refit.py    # 24 мин - refit + submission
 ### Предобученные веса
 - `coles_model.pt` - обученный CoLES энкодер (2.9 MB, в репо)
 - [`coles_embeddings.parquet`](https://disk.yandex.ru/d/u1A9SP00Tyn9aQ) - 256-dim эмбеддинги для 100K клиентов (181 MB, Яндекс.Диск)
-- `coles_seed_fb50.csv` - готовый сабмит (22 MB, в репо)
+- `submission.csv` - лучший сабмит (0.1445, 22 MB, в репо)
 
 ---
 
@@ -281,7 +316,8 @@ python run_coles_refit.py    # 24 мин - refit + submission
 
 | Модель / Бленд | Public LB | Примечание |
 |---|---|---|
-| CB + CoLES + FB + фичи типов фрода + 3-seed | **0.1414** |  Текущий лучший |
+| CB + CoLES + FB + device_fp + is_new_* + risk_interactions + 3-seed | **0.1445** | Текущий лучший |
+| CB + CoLES + FB + фичи типов фрода + 3-seed | 0.1414 | До расширения фичей |
 | CB ensemble + FB (соло) | 0.1384 | CatBoost + feedback-инъекция |
 | CB ensemble | 0.118 | Базовый CatBoost |
 
@@ -292,5 +328,3 @@ python run_coles_refit.py    # 24 мин - refit + submission
 Полная история решения с детальным описанием всех экспериментов: [WRITEUP.md](WRITEUP.md)
 
 ---
-
-*Built with CatBoost, PyTorch, Polars by team ICEQ*

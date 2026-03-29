@@ -47,6 +47,7 @@ CAT_COLS = [
     "channel_indicator_sub_type", "currency_iso_cd", "mcc_code_i", "pos_cd",
     "timezone", "operating_system_type", "phone_voip_call_state", "web_rdp_connection",
     "developer_tools_i", "compromised_i", "prev_mcc_code_i",
+    "accept_language_i", "browser_language_i", "device_fp_i",
 ]
 
 # Колонки для log_cnt цикла (частотные поведенческие фичи)
@@ -141,11 +142,22 @@ def build_features_part(part_id, force=False):
         pl.col("screen_size").str.extract(r"x(\d+)$", 1).cast(pl.Int16, strict=False).fill_null(-1).alias("screen_h"),
         pl.col("developer_tools").cast(pl.Int8, strict=False).fill_null(-1).alias("developer_tools_i"),
         pl.col("compromised").cast(pl.Int8, strict=False).fill_null(-1).alias("compromised_i"),
+        pl.col("accept_language").cast(pl.Int32, strict=False).fill_null(-1).alias("accept_language_i"),
+        pl.col("browser_language").cast(pl.Int32, strict=False).fill_null(-1).alias("browser_language_i"),
+        pl.col("accept_language").is_null().cast(pl.Int8).alias("accept_language_missing"),
         pl.when(pl.col("accept_language").is_not_null() & pl.col("browser_language").is_not_null())
           .then((pl.col("accept_language") != pl.col("browser_language")).cast(pl.Int8))
           .otherwise(pl.lit(-1).cast(pl.Int8)).alias("lang_mismatch"),
     ]).drop(["event_dttm", "operaton_amt", "mcc_code", "battery", "device_system_version",
              "screen_size", "developer_tools", "compromised", "accept_language", "browser_language"])
+    # Device fingerprint: unique synthetic device ID
+    lf = lf.with_columns(
+        (pl.col("screen_w").cast(pl.Int64) * 100_000_000
+         + pl.col("screen_h").cast(pl.Int64) * 100_000
+         + pl.col("operating_system_type").cast(pl.Int64) * 1000
+         + (pl.col("accept_language_i").cast(pl.Int64) % 1000)
+        ).alias("device_fp_i")
+    )
     lf = lf.sort(["customer_id", "event_ts", "event_id"])
 
     # Метки + сэмплирование
@@ -243,9 +255,17 @@ def build_features_part(part_id, force=False):
         (pl.cum_count("event_id").over(["customer_id", "mcc_code_i"]) - 1).cast(pl.Int16).alias("cnt_prev_same_mcc"),
         (pl.cum_count("event_id").over(["customer_id", "channel_indicator_sub_type"]) - 1).cast(pl.Int16).alias("cnt_prev_same_subtype"),
         (pl.cum_count("event_id").over(["customer_id", "session_id"]) - 1).cast(pl.Int16).alias("cnt_prev_same_session"),
+        (pl.cum_count("event_id").over(["customer_id", "device_fp_i"]) - 1).cast(pl.Int32).alias("cust_prev_same_device"),
+        (pl.cum_count("event_id").over(["customer_id", "timezone"]) - 1).cast(pl.Int32).alias("cust_prev_same_timezone"),
+        (pl.cum_count("event_id").over(["customer_id", "operating_system_type"]) - 1).cast(pl.Int32).alias("cust_prev_same_os"),
+        (pl.cum_count("event_id").over(["customer_id", "currency_iso_cd"]) - 1).cast(pl.Int32).alias("cnt_prev_same_currency"),
+        (pl.cum_count("event_id").over(["customer_id", "channel_indicator_type"]) - 1).cast(pl.Int32).alias("cust_prev_same_channel_type"),
         pl.col("event_ts").shift(1).over(["customer_id", "event_type_nm"]).alias("prev_same_type_ts"),
         pl.col("event_ts").shift(1).over(["customer_id", "event_desc"]).alias("prev_same_desc_ts"),
         pl.col("event_ts").shift(1).over(["customer_id", "mcc_code_i"]).alias("prev_same_mcc_ts"),
+        pl.col("event_ts").shift(1).over(["customer_id", "device_fp_i"]).alias("prev_same_device_ts"),
+        pl.col("event_ts").shift(1).over(["customer_id", "currency_iso_cd"]).alias("prev_same_currency_ts"),
+        pl.col("event_ts").shift(1).over(["customer_id", "channel_indicator_type"]).alias("prev_same_channel_type_ts"),
         pl.col("event_ts").first().over("customer_id").alias("cust_first_ts"),
         # Кумулятивные счётчики истории обратной связи
         pl.col("is_red_lbl").cum_sum().over("customer_id").cast(pl.Int32).alias("cust_red_lbl_cum"),
@@ -288,12 +308,34 @@ def build_features_part(part_id, force=False):
         pl.when(pl.col("prev_same_mcc_ts").is_not_null())
           .then((pl.col("event_ts") - pl.col("prev_same_mcc_ts")).dt.total_seconds())
           .otherwise(-1).cast(pl.Int32).alias("sec_since_prev_same_mcc"),
+        pl.when(pl.col("prev_same_device_ts").is_not_null())
+          .then((pl.col("event_ts") - pl.col("prev_same_device_ts")).dt.total_seconds())
+          .otherwise(-1).cast(pl.Int32).alias("sec_since_prev_same_device"),
+        pl.when(pl.col("prev_same_currency_ts").is_not_null())
+          .then((pl.col("event_ts") - pl.col("prev_same_currency_ts")).dt.total_seconds())
+          .otherwise(-1).cast(pl.Int32).alias("sec_since_prev_same_currency"),
+        pl.when(pl.col("prev_same_channel_type_ts").is_not_null())
+          .then((pl.col("event_ts") - pl.col("prev_same_channel_type_ts")).dt.total_seconds())
+          .otherwise(-1).cast(pl.Int32).alias("sec_since_prev_same_channel_type"),
         (pl.cum_count("event_id").over(["customer_id", "event_date"]) - 1).cast(pl.Int16).alias("events_before_today"),
         (pl.col("mcc_code_i") != pl.col("prev_mcc_code_i")).cast(pl.Int8).alias("mcc_changed"),
         (pl.col("session_id") != pl.col("prev_session_id")).cast(pl.Int8).alias("session_changed"),
         pl.when((pl.col("event_ts") - pl.col("cust_first_ts")).dt.total_days() > 0)
           .then(pl.col("cust_event_idx").cast(pl.Float32) / (pl.col("event_ts") - pl.col("cust_first_ts")).dt.total_days().cast(pl.Float32))
           .otherwise(1.0).cast(pl.Float32).alias("cust_events_per_day"),
+        # Account age in days
+        ((pl.col("event_ts") - pl.col("cust_first_ts")).dt.total_seconds().cast(pl.Float64) / 86400.0).fill_null(0).cast(pl.Float32).alias("days_since_first_event"),
+        # is_new_* flags: first time customer sees this value in their full history
+        (pl.col("cust_prev_same_device") == 0).cast(pl.Int8).alias("is_new_device_for_customer"),
+        (pl.col("cnt_prev_same_desc") == 0).cast(pl.Int8).alias("is_new_desc_for_customer"),
+        (pl.col("cnt_prev_same_mcc") == 0).cast(pl.Int8).alias("is_new_mcc_for_customer"),
+        (pl.col("cust_prev_same_timezone") == 0).cast(pl.Int8).alias("is_new_timezone_for_customer"),
+        (pl.col("cnt_prev_same_subtype") == 0).cast(pl.Int8).alias("is_new_subtype_for_customer"),
+        (pl.col("cust_prev_same_os") == 0).cast(pl.Int8).alias("is_new_os_for_customer"),
+        # amt_bucket: discretised amount magnitude (like amt_log_abs but integer bin)
+        (pl.col("amt").abs().log1p() * 4.0).floor().clip(0, 63).cast(pl.Int16).alias("amt_bucket"),
+        # Session cumulative amount before current event
+        (pl.col("amt").cum_sum().over(["customer_id", "session_id"]) - pl.col("amt")).cast(pl.Float32).alias("session_amt_before"),
         # ── Внутридневные фичи ── обнуляются в полночь
         (pl.col("amt_abs").cum_sum().over(["customer_id", "event_date"]) - pl.col("amt_abs")).cast(pl.Float32).alias("today_total_amount"),
         # ── A3: круглые суммы (признак соц. инженерии) ──
@@ -326,6 +368,34 @@ def build_features_part(part_id, force=False):
     lf = lf.with_columns(
         ((pl.col("tz_jump_magnitude") > 2) & (pl.col("sec_since_prev_event") > 0) & (pl.col("sec_since_prev_event") < 3600)).cast(pl.Int8).alias("impossible_travel")
     )
+
+    # ── Amount context vs desc/max ──
+    lf = lf.with_columns([
+        # Cumulative amount sum for same customer × event_desc (excluding current)
+        (pl.col("amt").cum_sum().over(["customer_id", "event_desc"]) - pl.col("amt")).alias("_desc_cum_amt"),
+        # Cumulative running max of abs amount per customer (shift(1) excludes current)
+        pl.col("amt_abs").shift(1).cum_max().over("customer_id").fill_null(0.0).alias("cust_prev_max_amt"),
+    ])
+    lf = lf.with_columns([
+        pl.when(pl.col("cnt_prev_same_desc") > 0)
+          .then((pl.col("_desc_cum_amt") / pl.col("cnt_prev_same_desc").cast(pl.Float64)).cast(pl.Float32))
+          .otherwise(0.0).alias("cust_prev_mean_amt_same_desc"),
+    ]).drop("_desc_cum_amt")
+    lf = lf.with_columns([
+        pl.when(pl.col("cust_prev_mean_amt_same_desc").abs() > 0.01)
+          .then(pl.col("amt_abs") / pl.col("cust_prev_mean_amt_same_desc"))
+          .otherwise(0.0).cast(pl.Float32).alias("amt_vs_same_desc_mean"),
+        pl.when(pl.col("cust_prev_max_amt") > 0.01)
+          .then(pl.col("amt_abs") / pl.col("cust_prev_max_amt"))
+          .otherwise(0.0).cast(pl.Float32).alias("amt_vs_prev_max"),
+    ])
+
+    # ── Events before this hour (intraday hourly count) ──
+    lf = lf.with_columns(pl.col("event_ts").dt.truncate("1h").alias("event_hour_trunc"))
+    lf = lf.with_columns(
+        (pl.cum_count("event_id").over(["customer_id", "event_hour_trunc"]) - 1).cast(pl.Int32).alias("events_before_hour")
+    )
+    lf = lf.drop("event_hour_trunc")
 
     # История обратной связи: исключаем текущее событие (cum - current)
     lf = lf.with_columns([
@@ -402,6 +472,62 @@ def build_features_part(part_id, force=False):
     ])
 
 
+    # ── Кросс-клиентский трекинг устройств ──
+    # Для каузальности сортируем по глобальному времени (не по клиенту)
+    log(f"  [part {part_id}] трекинг устройств (кросс-клиентский)...")
+    dev_df = lf.select([
+        "event_id", "device_fp_i", "customer_id", "event_ts",
+        "amt_abs", "event_desc", "mcc_code_i", "timezone",
+        "channel_indicator_sub_type", "session_id",
+    ]).collect()
+    dev_df = dev_df.sort(["event_ts", "event_id"])
+    # Кумулятивные счётчики по устройству (глобально по времени)
+    dev_df = dev_df.with_columns([
+        (pl.cum_count("event_id").over("device_fp_i") - 1).cast(pl.Int32).alias("device_prev_ops"),
+        (pl.cum_count("event_id").over(["device_fp_i", "customer_id"]) == 1).cast(pl.Int8).alias("_first_cust_on_dev"),
+        (pl.cum_count("event_id").over(["device_fp_i", "session_id"]) == 1).cast(pl.Int8).alias("_first_sess_on_dev"),
+    ])
+    dev_df = dev_df.with_columns([
+        (pl.col("_first_cust_on_dev").cum_sum().over("device_fp_i") - pl.col("_first_cust_on_dev")).cast(pl.Int32).alias("device_prev_unique_customers"),
+        (pl.col("_first_sess_on_dev").cum_sum().over("device_fp_i") - pl.col("_first_sess_on_dev")).cast(pl.Int32).alias("device_prev_unique_sessions"),
+    ]).drop(["_first_cust_on_dev", "_first_sess_on_dev"])
+    # Логарифмированные версии + diversity ratio
+    dev_df = dev_df.with_columns([
+        pl.col("device_prev_ops").log1p().cast(pl.Float32).alias("device_prev_ops_log"),
+        pl.col("device_prev_unique_customers").log1p().cast(pl.Float32).alias("device_prev_unique_customers_log"),
+        pl.col("device_prev_unique_sessions").log1p().cast(pl.Float32).alias("device_prev_unique_sessions_log"),
+        pl.when(pl.col("device_prev_ops") > 0)
+          .then(pl.col("device_prev_unique_customers").cast(pl.Float32) / (pl.col("device_prev_ops").cast(pl.Float32) + 1e-6))
+          .otherwise(0.0).cast(pl.Float32).alias("device_customer_diversity"),
+        # Счётчики специфичного поведения на устройстве
+        (pl.cum_count("event_id").over(["device_fp_i", "customer_id"]) - 1).cast(pl.Int32).alias("device_prev_same_customer"),
+        (pl.cum_count("event_id").over(["device_fp_i", "event_desc"]) - 1).cast(pl.Int32).alias("device_prev_same_desc"),
+        (pl.cum_count("event_id").over(["device_fp_i", "mcc_code_i"]) - 1).cast(pl.Int32).alias("device_prev_same_mcc"),
+        (pl.cum_count("event_id").over(["device_fp_i", "timezone"]) - 1).cast(pl.Int32).alias("device_prev_same_timezone"),
+        (pl.cum_count("event_id").over(["device_fp_i", "channel_indicator_sub_type"]) - 1).cast(pl.Int32).alias("device_prev_same_subtype"),
+        # Кумулятивная сумма суммы клиента на устройстве (для среднего)
+        (pl.col("amt_abs").cum_sum().over(["device_fp_i", "customer_id"])).alias("_dev_cust_cum_amt"),
+    ])
+    dev_df = dev_df.with_columns([
+        pl.when(pl.col("device_prev_same_customer") > 0)
+          .then(((pl.col("_dev_cust_cum_amt") - pl.col("amt_abs")) / pl.col("device_prev_same_customer").cast(pl.Float64)).cast(pl.Float32))
+          .otherwise(0.0).alias("cust_prev_mean_amt_same_device"),
+    ]).drop("_dev_cust_cum_amt")
+    dev_cols = [
+        "event_id", "device_prev_ops_log", "device_prev_unique_customers_log",
+        "device_prev_unique_sessions_log", "device_customer_diversity",
+        "device_prev_same_customer", "device_prev_same_desc", "device_prev_same_mcc",
+        "device_prev_same_timezone", "device_prev_same_subtype", "cust_prev_mean_amt_same_device",
+    ]
+    lf = lf.join(dev_df.select(dev_cols).lazy(), on="event_id", how="left")
+    del dev_df; gc.collect()
+    # Соотношение текущей суммы к среднему на устройстве
+    lf = lf.with_columns(
+        pl.when(pl.col("cust_prev_mean_amt_same_device").abs() > 0.01)
+          .then(pl.col("amt_abs") / pl.col("cust_prev_mean_amt_same_device"))
+          .otherwise(0.0).cast(pl.Float32).alias("amt_vs_same_device_mean")
+    )
+
     # Целевая переменная
     lf = lf.with_columns(
         pl.when(pl.col("is_train_sample")).then((pl.col("train_target_raw") == 1).cast(pl.Int8)).otherwise(pl.lit(None)).alias("target_bin")
@@ -424,6 +550,12 @@ def build_features_part(part_id, force=False):
         r = roll_df.rolling(index_column="event_ts", period=window, by="customer_id", closed="left").agg(pl.col("amt_abs").sum().cast(pl.Float32).alias(f"amt_sum_{suffix}"))
         roll_df = roll_df.with_columns(r[f"amt_sum_{suffix}"])
 
+    # Максимальная сумма за 24ч
+    r = roll_df.rolling(index_column="event_ts", period="1d", by="customer_id", closed="left").agg(
+        pl.col("amt_abs").max().cast(pl.Float32).alias("max_amt_last_24h")
+    )
+    roll_df = roll_df.with_columns(r["max_amt_last_24h"])
+
     # ── A1: VoIP за последние 15 минут ──
     r = roll_df.rolling(index_column="event_ts", period="15m", by="customer_id", closed="left").agg(
         pl.col("phone_voip_call_state").filter(pl.col("phone_voip_call_state") == 1).len().cast(pl.Int16).alias("voip_cnt_15min")
@@ -445,7 +577,7 @@ def build_features_part(part_id, force=False):
 
     roll_cols = [
         "event_id", "cnt_15min", "cnt_1h", "cnt_6h", "cnt_24h", "cnt_7d",
-        "amt_sum_15min", "amt_sum_1h", "amt_sum_24h",
+        "amt_sum_15min", "amt_sum_1h", "amt_sum_24h", "max_amt_last_24h",
         "voip_cnt_15min", "unique_mcc_1h", "unique_mcc_24h", "tz_change_cnt_24h",
     ]
     lf = lf.join(roll_df.select(roll_cols).lazy(), on="event_id", how="left")
@@ -459,6 +591,13 @@ def build_features_part(part_id, force=False):
         # Производные фичи
         (pl.col("voip_cnt_15min") > 0).cast(pl.Int8).alias("had_voip_before_txn"),
         pl.when(pl.col("unique_mcc_24h") > 0).then(pl.col("unique_mcc_1h").cast(pl.Float32) / pl.col("unique_mcc_24h").cast(pl.Float32)).otherwise(0.0).cast(pl.Float32).alias("mcc_scatter_ratio"),
+        # Текущая сумма vs сумма за период
+        pl.when(pl.col("amt_sum_1h").fill_null(0.0) > 1.0)
+          .then(pl.col("amt_abs") / (pl.col("amt_sum_1h").fill_null(0.0) + 1.0))
+          .otherwise(0.0).cast(pl.Float32).alias("amt_vs_1h_sum"),
+        pl.when(pl.col("amt_sum_24h").fill_null(0.0) > 1.0)
+          .then(pl.col("amt_abs") / (pl.col("amt_sum_24h").fill_null(0.0) + 1.0))
+          .otherwise(0.0).cast(pl.Float32).alias("amt_vs_24h_sum"),
     ])
 
     # Сбор и фильтрация
@@ -467,7 +606,10 @@ def build_features_part(part_id, force=False):
         "channel_indicator_sub_type", "currency_iso_cd", "mcc_code_i", "pos_cd", "timezone",
         "operating_system_type", "phone_voip_call_state", "web_rdp_connection",
         "developer_tools_i", "compromised_i",
-        "amt", "amt_log_abs", "amt_abs", "amt_is_negative",
+        # ── Новые языковые и device fp ──
+        "accept_language_i", "browser_language_i", "accept_language_missing",
+        "device_fp_i",
+        "amt", "amt_log_abs", "amt_abs", "amt_is_negative", "amt_bucket",
         "hour", "weekday", "day", "month", "is_weekend", "is_night", "is_night_early",
         "hour_sin", "hour_cos", "event_day_number", "day_of_year",
         "battery_pct", "os_ver_major", "screen_w", "screen_h", "screen_pixels", "screen_ratio",
@@ -482,11 +624,31 @@ def build_features_part(part_id, force=False):
         "events_before_today",
         "mcc_changed", "prev_mcc_code_i", "session_changed",
         "cust_events_per_day",
+        # ── Новые: is_new_* флаги ──
+        "is_new_device_for_customer", "is_new_desc_for_customer", "is_new_mcc_for_customer",
+        "is_new_timezone_for_customer", "is_new_subtype_for_customer", "is_new_os_for_customer",
+        # ── Новые: velocity по валюте и каналу ──
+        "cnt_prev_same_currency", "sec_since_prev_same_currency",
+        "sec_since_prev_same_channel_type", "sec_since_prev_same_device",
+        # ── Новые: контекст суммы ──
+        "cust_prev_max_amt", "amt_vs_prev_max",
+        "cust_prev_mean_amt_same_desc", "amt_vs_same_desc_mean",
+        "session_amt_before",
+        # ── Новые: временные ──
+        "days_since_first_event", "events_before_hour",
+        # ── Новые: кросс-клиентский трекинг устройств ──
+        "device_prev_ops_log", "device_prev_unique_customers_log", "device_prev_unique_sessions_log",
+        "device_customer_diversity",
+        "device_prev_same_customer", "device_prev_same_desc", "device_prev_same_mcc",
+        "device_prev_same_timezone", "device_prev_same_subtype",
+        "cust_prev_mean_amt_same_device", "amt_vs_same_device_mean",
         # Скользящая скорость
         "cnt_15min", "cnt_1h", "cnt_6h", "cnt_24h", "cnt_7d",
         "amt_sum_15min", "amt_sum_1h", "amt_sum_24h",
         "amt_ratio_24h", "burst_ratio_1h_24h", "spend_concentration_1h",
         "burst_ratio_15m_1h",
+        # ── Новые: rolling max + ratios ──
+        "max_amt_last_24h", "amt_vs_1h_sum", "amt_vs_24h_sum",
         # Внутридневные
         "today_total_amount", "today_max_amount", "today_amt_vs_daily_norm",
         # Скользящие средние
@@ -610,6 +772,14 @@ def main():
         "channel_indicator_sub_type": pl.col("channel_indicator_sub_type").cast(pl.Int16, strict=False).fill_null(-1).alias("channel_indicator_sub_type"),
         "event_type_nm": pl.col("event_type_nm").cast(pl.Int32, strict=False).fill_null(-1).alias("event_type_nm"),
         "pos_cd": pl.col("pos_cd").cast(pl.Int16, strict=False).fill_null(-1).alias("pos_cd"),
+        # Новые ключи apriorных вероятностей
+        "accept_language_i": pl.col("accept_language").cast(pl.Int32, strict=False).fill_null(-1).alias("accept_language_i"),
+        "device_fp_i": (
+            pl.col("screen_size").str.extract(r"^(\d+)", 1).cast(pl.Int64, strict=False).fill_null(-1) * 100_000_000
+            + pl.col("screen_size").str.extract(r"x(\d+)$", 1).cast(pl.Int64, strict=False).fill_null(-1) * 100_000
+            + pl.col("operating_system_type").cast(pl.Int64, strict=False).fill_null(-1) * 1000
+            + (pl.col("accept_language").cast(pl.Int32, strict=False).fill_null(-1).cast(pl.Int64) % 1000)
+        ).alias("device_fp_i"),
     }
     prior_feat_cols = []
     val_border_str = str(VAL_WINDOW_START)
@@ -664,6 +834,23 @@ def main():
 
     if prior_feat_cols:
         features = features.with_columns([pl.col(c).fill_null(pl.col(c).mean()).alias(c) for c in prior_feat_cols])
+
+    # ── Risk interaction features: prior_red_rate * (1 + is_new_flag) ──
+    log("RISK INTERACTION FEATURES")
+    risk_exprs = []
+    for prior_col, flag_col, alias in [
+        ("prior_event_desc_red_rate",    "is_new_desc_for_customer",     "risk_new_desc_x_prior"),
+        ("prior_timezone_red_rate",      "is_new_timezone_for_customer", "risk_new_tz_x_prior"),
+        ("prior_mcc_code_i_red_rate",    "is_new_mcc_for_customer",      "risk_new_mcc_x_prior"),
+        ("prior_device_fp_i_red_rate",   "is_new_device_for_customer",   "risk_new_device_x_prior"),
+    ]:
+        if prior_col in features.columns and flag_col in features.columns:
+            risk_exprs.append(
+                (pl.col(prior_col) * (1.0 + pl.col(flag_col).cast(pl.Float32))).cast(pl.Float32).alias(alias)
+            )
+    if risk_exprs:
+        features = features.with_columns(risk_exprs)
+        log(f"  Added {len(risk_exprs)} risk interaction features")
 
     # ── Фичи паттернов пропусков ──
     log("ФИЧИ ПАТТЕРНОВ ПРОПУСКОВ")
