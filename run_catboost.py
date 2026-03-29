@@ -599,6 +599,16 @@ def build_features_part(part_id, force=False):
           .then(pl.col("amt_abs") / (pl.col("amt_sum_24h").fill_null(0.0) + 1.0))
           .otherwise(0.0).cast(pl.Float32).alias("amt_vs_24h_sum"),
     ])
+    # Дополнительные interaction-фичи
+    lf = lf.with_columns([
+        (pl.col("is_new_device_for_customer").cast(pl.Float32) * pl.col("device_customer_diversity").fill_null(0.0)).cast(pl.Float32).alias("new_device_diversity_risk"),
+        (pl.col("any_risk_flag").cast(pl.Float32) * pl.col("burst_ratio_1h_24h").fill_null(0.0)).cast(pl.Float32).alias("risk_velocity_interaction"),
+        (pl.col("any_risk_flag").cast(pl.Float32) * pl.col("spend_concentration_1h").fill_null(0.0)).cast(pl.Float32).alias("risk_spend_concentration"),
+        ((pl.col("is_new_timezone_for_customer") == 1) &
+         (pl.col("tz_change_cnt_24h").fill_null(0) > 0) &
+         (pl.col("sec_since_prev_event") > 0) &
+         (pl.col("sec_since_prev_event") < 3600)).cast(pl.Int8).alias("rapid_timezone_switch"),
+    ])
 
     # Сбор и фильтрация
     FEATURE_COLS = [
@@ -665,6 +675,8 @@ def build_features_part(part_id, force=False):
         "voip_cnt_15min", "had_voip_before_txn",                # A1: VoIP до транзакции
         "unique_mcc_1h", "unique_mcc_24h", "mcc_scatter_ratio", # C2: разброс MCC
         "tz_change_cnt_24h",                                     # B3: скорость смены TZ
+        "new_device_diversity_risk", "risk_velocity_interaction",
+        "risk_spend_concentration", "rapid_timezone_switch",
     ] + [f"{c}_log_cnt" for c in LOG_CNT_COLS]
 
     out_df = lf.filter(pl.col("is_train_sample") | pl.col("is_test")).select(META_COLS + FEATURE_COLS + FB_FEATURE_COLS).collect()
@@ -746,6 +758,32 @@ def _sigmoid(x):
 def _logit(p):
     p = np.clip(p, 1e-8, 1 - 1e-8)
     return np.log(p / (1 - p))
+
+def optimize_blend_weights(y_true, pv_main, pv_rec, pv_prod, coarse_step=0.05, fine_radius=0.08, fine_step=0.01):
+    """2-stage подбор весов для blend: coarse + fine локальный поиск."""
+    best_ap, best_w = -1.0, (0.35, 0.0, 0.65)
+
+    for wm in np.arange(0, 0.91, coarse_step):
+        for wr in np.arange(0, 0.61, coarse_step):
+            wp = round(1.0 - wm - wr, 4)
+            if wp < 0:
+                continue
+            ap = average_precision_score(y_true, wm * pv_main + wr * pv_rec + wp * pv_prod)
+            if ap > best_ap:
+                best_ap, best_w = ap, (float(wm), float(wr), float(wp))
+
+    wm0, wr0, _ = best_w
+    wm_min, wm_max = max(0.0, wm0 - fine_radius), min(1.0, wm0 + fine_radius)
+    wr_min, wr_max = max(0.0, wr0 - fine_radius), min(1.0, wr0 + fine_radius)
+    for wm in np.arange(wm_min, wm_max + 1e-9, fine_step):
+        for wr in np.arange(wr_min, wr_max + 1e-9, fine_step):
+            wp = 1.0 - wm - wr
+            if wp < 0:
+                continue
+            ap = average_precision_score(y_true, wm * pv_main + wr * pv_rec + wp * pv_prod)
+            if ap > best_ap:
+                best_ap, best_w = ap, (float(round(wm, 4)), float(round(wr, 4)), float(round(wp, 4)))
+    return best_w, best_ap
 
 
 # ══════════════════════════════════════════════════════════
@@ -968,14 +1006,7 @@ def main():
     log(f"  Product: {average_precision_score(yv, pv_prod):.6f}")
 
 
-    best_ap, best_w = -1, None
-    for wm in np.arange(0, 0.91, 0.05):
-        for wr in np.arange(0, 0.41, 0.05):
-            wp = round(1 - wm - wr, 2)
-            if wp < 0: continue
-            bl = wm * pv_main + wr * pv_rec + wp * pv_prod
-            ap = average_precision_score(yv, bl)
-            if ap > best_ap: best_ap, best_w = ap, (float(wm), float(wr), float(wp))
+    best_w, best_ap = optimize_blend_weights(yv, pv_main, pv_rec, pv_prod)
     log(f"  CB blend: {best_w}, PR-AUC={best_ap:.6f}")
 
     cb_bl = best_w[0] * pv_main + best_w[1] * pv_rec + best_w[2] * pv_prod
@@ -1045,4 +1076,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
